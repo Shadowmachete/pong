@@ -1,5 +1,5 @@
 .intel_syntax noprefix
-.globl x11_connect_to_server, x11_send_handshake, x11_next_id, x11_open_font, x11_create_gc, x11_create_window, x11_map_window
+.globl x11_connect_to_server, x11_send_handshake, x11_next_id, x11_open_font, x11_create_gc, x11_query_extension_randr, x11_rrgetmonitors, x11_create_window, x11_map_window
 
 .extern id, id_base, id_mask, root_visual_id
 
@@ -174,7 +174,7 @@ x11_send_handshake:
   cmp     rbx, 16 + 4
   jb      die
 
-  mov     cx, WORD PTR [rsi + 16]# vendor length (v)
+  mov     cx, WORD PTR [rsi + 16] # vendor length (v)
   movzx   rcx, cx
 
   cmp     rbx, 21 + 1
@@ -307,6 +307,120 @@ x11_create_gc:
   jnz     die
 
   add     rsp, 8*8
+
+  pop     rbp
+  ret
+
+.type x11_query_extension_randr, @function
+# Query extension for RANDR opcode
+# @param rdi The socket file descriptor
+# @returns rax The extension opcode for RANDR
+x11_query_extension_randr:
+  push    rbp
+  mov     rbp, rsp
+
+  .set X11_OP_REQ_QUERY_EXTENSION, 0x62
+  .set CREATE_QUERY_EXTENSION_PACKET_U32_COUNT, 4
+
+  sub     rsp, 2*8
+
+  mov     BYTE PTR [rsp + 0], X11_OP_REQ_QUERY_EXTENSION
+  mov     BYTE PTR [rsp + 1], 0
+  mov     WORD PTR [rsp + 2], CREATE_QUERY_EXTENSION_PACKET_U32_COUNT
+  mov     WORD PTR [rsp + 4], 5
+  mov     WORD PTR [rsp + 6], 0
+  mov     BYTE PTR [rsp + 8], 'R'
+  mov     BYTE PTR [rsp + 9], 'A'
+  mov     BYTE PTR [rsp + 10], 'N'
+  mov     BYTE PTR [rsp + 11], 'D'
+  mov     BYTE PTR [rsp + 12], 'R'
+  mov     BYTE PTR [rsp + 13], 0
+  mov     BYTE PTR [rsp + 14], 0
+  mov     BYTE PTR [rsp + 15], 0
+
+  mov     rax, SYSCALL_WRITE
+  lea     rsi, [rsp]
+  mov     rdx, CREATE_QUERY_EXTENSION_PACKET_U32_COUNT * 4
+  syscall
+
+  cmp     rax, CREATE_QUERY_EXTENSION_PACKET_U32_COUNT * 4
+  jnz     die
+
+  mov     rax, SYSCALL_READ
+  lea     rsi, [read_buf]
+  mov     rdx, 32
+  syscall
+
+  cmp     rax, 32
+  jnz     die
+
+  cmp     BYTE PTR [read_buf + 8], 1      # check if the extension is present
+  jz      .randr_present
+
+  # If extension not present, set rax 0
+  mov     rax, 0
+  jmp     .end
+
+  .randr_present:
+  # get the major-opcode
+  mov     al, BYTE PTR [read_buf + 9]
+  movzx   rax, al                         # fill with zeroes
+
+  .end:
+  add     rsp, 2*8
+
+  pop     rbp
+  ret
+
+.type x11_rrgetmonitors, @function
+# Request for the monitor layout
+# @param rdi The socket file descriptor
+# @param rax RANDR extension opcode from QueryExtension
+# @param esi Root window id
+x11_rrgetmonitors:
+  push    rbp
+  mov     rbp, rsp
+
+  .set X11_OP_REQ_RRGETMONITORS, 0x2A
+  .set CREATE_RRGETMONITORS_PACKET_U32_COUNT, 3
+
+  sub     rsp, 2*8
+
+  mov     BYTE PTR [rsp], al
+  mov     BYTE PTR [rsp + 1], X11_OP_REQ_RRGETMONITORS
+  mov     WORD PTR [rsp + 2], CREATE_RRGETMONITORS_PACKET_U32_COUNT
+  mov     DWORD PTR [rsp + 4], esi
+  mov     BYTE PTR [rsp + 8], 1
+  mov     BYTE PTR [rsp + 9], 0
+  mov     BYTE PTR [rsp + 10], 0
+  mov     BYTE PTR [rsp + 11], 0
+
+  mov     rax, SYSCALL_WRITE
+  lea     rsi, [rsp]
+  mov     rdx, CREATE_RRGETMONITORS_PACKET_U32_COUNT * 4
+  syscall
+
+  cmp     rax, CREATE_RRGETMONITORS_PACKET_U32_COUNT * 4
+  jnz     die
+
+  mov     rax, SYSCALL_READ
+  lea     rsi, [read_buf]
+  mov     rdx, 32 + 40                        # 32 for header + 40 for first Window
+  syscall
+
+  cmp     rax, 32 + 40
+  jnz     die
+
+  cmp     BYTE PTR [read_buf], 1              # check for success
+  jnz     die
+
+  mov     dx, WORD PTR [read_buf + 32 + 12]   # magic numbers derived from gdbing
+  mov     WORD PTR [WINDOW_W], dx
+
+  mov     dx, WORD PTR [read_buf + 32 + 14]   # and finding my screen size in the bytes
+  mov     WORD PTR [WINDOW_H], dx
+
+  add     rsp, 2*8
 
   pop     rbp
   ret

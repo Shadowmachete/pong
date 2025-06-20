@@ -1,5 +1,5 @@
 .intel_syntax noprefix
-.globl _start, id, id_base, id_mask, root_visual_id
+.globl _start, id, id_base, id_mask, root_visual_id, WINDOW_W, WINDOW_H
 
 .section .data
 msg:
@@ -13,6 +13,10 @@ id_mask:
   .long 0
 root_visual_id:
   .long 0
+WINDOW_H:
+  .word 0
+WINDOW_W:
+  .word 0
 
 .set SYSCALL_WRITE, 1
 .set SYSCALL_EXIT, 60
@@ -57,14 +61,37 @@ _start:
   call    x11_next_id
   mov     ebx, eax            # store window id in ebx
 
+  # WE NEED TO FIND THE WINDOW_W AND WINDOW_H
+  # WE WILL SEND QueryExtension request to Xlib with extension RANDR
+  # WE WILL THEN GET THE Extension opcode and get the monitors
   mov     rdi, r15
-  mov     esi, eax
+  call    x11_query_extension_randr
+
+  cmp     rax, 0
+  jne     .randr_present
+
+  # if randr not present then just set the WINDOW_H and WINDOW_W
+  # to some default values
+
+  mov     WORD PTR [WINDOW_W], 1920
+  mov     WORD PTR [WINDOW_H], 1080
+  jmp     .past_randr
+
+  .randr_present:
+  mov     rdi, r15
+  mov     esi, r12d
+  call    x11_rrgetmonitors
+
+  .past_randr:
+  mov     rdi, r15
+  mov     esi, ebx
   mov     edx, r12d
   mov     ecx, [root_visual_id]
-  mov     r8d, 200 | (200 << 16)    # x and y are 200
-  .set WINDOW_W, 800
-  .set WINDOW_H, 600
-  mov     r9d, WINDOW_W | (WINDOW_H << 16)
+  mov     r8d, 0 | (0 << 16)  # x and y are 0
+  movzx   r9d, WORD PTR [WINDOW_H]
+  shl     r9d, 16
+  movzx   eax, WORD PTR [WINDOW_W]
+  or      r9d, eax
   call    x11_create_window
 
   mov     rdi, r15
