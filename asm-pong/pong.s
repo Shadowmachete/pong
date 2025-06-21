@@ -1,5 +1,6 @@
 .intel_syntax noprefix
 .globl _start, id, id_base, id_mask, root_visual_id, WINDOW_W, WINDOW_H
+.globl LEFT_PADDLE_X, LEFT_PADDLE_Y, RIGHT_PADDLE_X, RIGHT_PADDLE_Y, PADDLE_H, PADDLE_W
 
 .section .data
 msg:
@@ -17,17 +18,31 @@ WINDOW_H:
   .word 0
 WINDOW_W:
   .word 0
+LEFT_PADDLE_X:
+  .word 0
+RIGHT_PADDLE_X:
+  .word 0
+LEFT_PADDLE_Y:
+  .word 0
+RIGHT_PADDLE_Y:
+  .word 0
+PADDLE_H: # height / 4
+  .word 0
+PADDLE_W: # width / 80
+  .word 0
 
 .set SYSCALL_WRITE, 1
 .set SYSCALL_EXIT, 60
+
+.set BALL_RADIUS, 20
 
 .section .text
 _start:
   # start up
   mov     rax, SYSCALL_WRITE
   mov     rdi, 1              # stdout fd
-  lea     rsi, msg            # load address of msg into %rsi
-  mov     rdx, len            # load length into %rdi
+  lea     rsi, msg            # load address of msg into rsi
+  mov     rdx, len            # load length into rdi
   syscall
 
   cmp     rax, 0
@@ -98,8 +113,64 @@ _start:
   mov     esi, ebx
   call    x11_map_window
 
-loop:
-  jmp     loop
+  # calculate all the details for the paddles
+
+  # calculate PADDLE_H and PADDLE_W
+  # guess
+  # PADDLE_H = WINDOW_H / 4
+  # PADDLE_W = WINDOW_W / 80
+  movzx   ax, WORD PTR [WINDOW_W]
+  mov     cx, ax
+  mov     di, 80
+  xor     dx, dx
+  div     di
+
+  mov     WORD PTR [PADDLE_W], ax
+
+  movzx   ax, WORD PTR [WINDOW_H]
+  mov     di, 4
+  xor     dx, dx
+  div     di
+
+  mov     WORD PTR [PADDLE_H], ax
+
+  # calculate PADDLE_H / 2
+  mov     di, 2
+  xor     dx, dx
+  div     di
+
+  mov     si, ax              # keep PADDLE_H / 2 in si for now ig
+
+  # calculate CENTER_H = WINDOW_H / 2
+  movzx   ax, WORD PTR [WINDOW_H]
+  mov     di, 2
+  xor     dx, dx
+  div     di                  # ax = CENTER_H
+
+  sub     ax, si              # ax = CENTER_H - PADDLE_H / 2
+
+  mov     WORD PTR [LEFT_PADDLE_Y], ax
+  mov     WORD PTR [RIGHT_PADDLE_Y], ax
+
+  # store WINDOW_W / 20 in ax
+  movzx   ax, cx
+  mov     di, 20
+  xor     dx, dx
+  div     di
+
+  mov     WORD PTR [LEFT_PADDLE_X], ax
+  sub     cx, ax
+  mov     WORD PTR [RIGHT_PADDLE_X], cx
+
+  # set fd to non-blocking
+  mov     rdi, r15
+  call    set_fd_non_blocking
+
+  # poll messages
+  mov     rdi, r15
+  mov     esi, ebx
+  mov     edx, r14d
+  call    poll_messages
 
   # exit
   mov     rax, SYSCALL_EXIT

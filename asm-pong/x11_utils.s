@@ -1,10 +1,11 @@
 .intel_syntax noprefix
-.globl x11_connect_to_server, x11_send_handshake, x11_next_id, x11_open_font, x11_create_gc, x11_query_extension_randr, x11_rrgetmonitors, x11_create_window, x11_map_window
+.globl x11_connect_to_server, x11_send_handshake, x11_next_id, x11_open_font, x11_create_gc, x11_query_extension_randr, x11_rrgetmonitors, x11_create_window, x11_map_window, poll_messages
 
 .extern id, id_base, id_mask, root_visual_id
 
 .set SYSCALL_READ, 0
 .set SYSCALL_WRITE, 1
+.set SYSCALL_POLL, 7
 .set SYSCALL_SOCKET, 41
 .set SYSCALL_CONNECT, 42
 
@@ -497,6 +498,160 @@ x11_map_window:
   jnz     die
 
   add     rsp, 16
+
+  pop     rbp
+  ret
+
+.type x11_read_reply, @function
+# Read the X11 server reply
+# @return The message code in al
+x11_read_reply:
+  push    rbp
+  mov     rbp, rsp
+
+  # read 32 bytes into read_buf
+  # most messages are around 32 bytes
+  mov     rax, SYSCALL_READ
+  lea     rsi, [read_buf]
+  mov     rdx, 32
+  syscall
+
+  cmp     rax, 1
+  jle     die
+
+  mov     al, BYTE PTR [read_buf]
+
+  pop     rbp
+  ret
+
+.type poll_messages, @function
+# Poll messages from the X11 server with poll(2)
+# @param rdi The socket file descriptor
+# @param esi The window id
+# @param edx The gc id
+poll_messages:
+  push    rbp
+  mov     rbp, rsp
+
+  sub     rsp, 32
+
+  .set POLLIN, 0x001
+  .set POLLPRI, 0x002
+  .set POLLOUT, 0x004
+  .set POLLERR, 0x008
+  .set POLLHUP, 0x010
+  .set POLLNVAL, 0x020
+
+  mov     DWORD PTR [rsp + 0*4], edi
+  mov     DWORD PTR [rsp + 1*4], POLLIN
+
+  mov     DWORD PTR [rsp + 16], esi         # window id
+  mov     DWORD PTR [rsp + 20], edx         # gc id
+  mov     BYTE PTR [rsp + 24], 0            # exposed? (bool)
+
+  .loop:
+    mov   rax, SYSCALL_POLL
+    lea   rdi, [rsp]                        # struct pollfd *fds
+    mov   rsi, 1                            # nfds_t nfds
+    mov   rdx, -1                           # int timeout
+    syscall
+
+    cmp   rax, 0
+    jle   die
+
+    # polling error
+    cmp   DWORD PTR [rsp + 2*4], POLLERR
+    je    die
+
+    # other side has closed
+    cmp   DWORD PTR [rsp + 2*4], POLLHUP
+    je    die
+
+    mov   rdi, [rsp + 0*4]
+    call  x11_read_reply
+
+    .set X11_EVENT_EXPOSURE, 0xc
+    cmp   eax, X11_EVENT_EXPOSURE
+    jnz   .received_other_event
+
+    .received_exposed_event:
+
+    mov BYTE PTR [rsp + 24], 1            # Mark as exposed
+
+    .received_other_event:
+
+    cmp BYTE PTR [rsp + 24], 1            # exposed?
+    jnz .loop
+
+    # do your stuff here
+    .draw_paddles:
+      mov   rdi, [rsp + 0]                # socket fd
+      mov   esi, [rsp + 16]               # window id
+      mov   edx, [rsp + 20]               # gc id
+      call  x11_draw_paddles
+
+    jmp .loop
+
+  add     rsp, 32
+
+  pop     rbp
+  ret
+
+.type x11_draw_paddles, @function
+# Draw the paddles in a X11 window
+# @param rdi The socket file descriptor
+# @param esi The window id
+# @param edx The gc id
+x11_draw_paddles:
+  push    rbp
+  mov     rbp, rsp
+
+  .set  X11_OP_REQ_POLY_FILL_RECTANGLE, 0x46
+
+  sub     rsp, 32
+
+  mov     BYTE PTR [rsp + 0], X11_OP_REQ_POLY_FILL_RECTANGLE
+  mov     BYTE PTR [rsp + 1], 0
+  mov     WORD PTR [rsp + 2], 3 + 2 * 2   # request length 3+2n, 2 rectangles
+  mov     DWORD PTR [rsp + 4], esi
+  mov     DWORD PTR [rsp + 8], edx
+
+  # RECTANGLE [x, y: INT16, width, height: CARD16]
+  # left paddle
+  movzx   ax, WORD PTR [LEFT_PADDLE_X]
+  mov     WORD PTR [rsp + 12], ax
+
+  movzx   ax, WORD PTR [LEFT_PADDLE_Y]
+  mov     WORD PTR [rsp + 14], ax
+
+  movzx   ax, WORD PTR [PADDLE_W]
+  mov     WORD PTR [rsp + 16], ax
+
+  movzx   ax, WORD PTR [PADDLE_H]
+  mov     WORD PTR [rsp + 18], ax
+
+  # right paddle
+  movzx   ax, WORD PTR [RIGHT_PADDLE_X]
+  mov     WORD PTR [rsp + 20], ax
+
+  movzx   ax, WORD PTR [RIGHT_PADDLE_Y]
+  mov     WORD PTR [rsp + 22], ax
+
+  movzx   ax, WORD PTR [PADDLE_W]
+  mov     WORD PTR [rsp + 24], ax
+
+  movzx   ax, WORD PTR [PADDLE_H]
+  mov     WORD PTR [rsp + 26], ax
+
+  mov     rax, SYSCALL_WRITE
+  lea     rsi, [rsp]
+  mov     rdx, 28
+  syscall
+
+  cmp     rax, 28
+  jnz     die
+
+  add     rsp, 32
 
   pop     rbp
   ret

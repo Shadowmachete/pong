@@ -1,20 +1,21 @@
 .intel_syntax noprefix
-.globl die, read_xauth_cookie
+.globl die, set_fd_non_blocking
 
 .set SYSCALL_READ, 0
 .set SYSCALL_WRITE, 1
 .set SYSCALL_OPEN, 2
 .set SYSCALL_CLOSE, 3
 .set SYSCALL_EXIT, 60
+.set SYSCALL_FCNTL, 72
 
 .section .rodata
 err_msg:
   .asciz "Error encountered\n"
 err_len = . - err_msg
 
-.section .bss
-xauth_cookie:
-  .skip 64
+; .section .bss
+; xauth_cookie:
+;   .skip 64
 
 .section .text
 .type die, @function
@@ -29,6 +30,43 @@ die:
   mov     rax, SYSCALL_EXIT
   mov     rdi, 1              # error code 1
   syscall
+
+.type set_fd_non_blocking, @function
+# Sets a file descriptor to non-blocking mode
+# @param rdi The file descriptor
+set_fd_non_blocking:
+  push    rbp
+  mov     rbp, rsp
+
+  .set F_GETFL, 3
+  .set F_SETFL, 4
+
+  .set O_NONBLOCK, 2048
+
+  # get the flags
+  mov     rax, SYSCALL_FCNTL
+  mov     rsi, F_GETFL
+  mov     rdx, 0
+  syscall
+
+  cmp     rax, 0
+  jl      die
+
+  # `or` current file status flag with O_NONBLOCK
+  mov     rdx, rax
+  or      rdx, O_NONBLOCK
+
+  # set the flags
+  mov     rax, SYSCALL_FCNTL
+  mov     rsi, F_SETFL
+  syscall
+
+  cmp     rax, 0
+  jl      die
+
+  pop     rbp
+  ret
+
 
                 # authentication that didnt work
                 # .type read_xauth_cookie, @function
