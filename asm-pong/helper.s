@@ -1,5 +1,5 @@
 .intel_syntax noprefix
-.globl die, set_fd_non_blocking
+.globl die, set_fd_non_blocking, print_hex_2
 
 .set SYSCALL_READ, 0
 .set SYSCALL_WRITE, 1
@@ -12,10 +12,8 @@
 err_msg:
   .asciz "Error encountered\n"
 err_len = . - err_msg
-
-; .section .bss
-; xauth_cookie:
-;   .skip 64
+key_press_msg:
+  .ascii "[KEYPRESS] Key: "
 
 .section .text
 .type die, @function
@@ -67,6 +65,56 @@ set_fd_non_blocking:
   pop     rbp
   ret
 
+.type print_hex_2, @function
+# Prints AL as 2-digit hex to stdout
+# @param al The code
+print_hex_2:
+  push    rcx
+  sub     rsp, 32
+
+  mov     r8, rax            # Save original value (al)
+
+  mov     rax, SYSCALL_WRITE
+  mov     rdi, 1
+  lea     rsi, key_press_msg
+  mov     rdx, 16
+  syscall
+
+  mov     rax, r8
+  and     al, 0xF0            # Upper nibble
+  shr     al, 4
+  cmp     al, 10
+  jl      .upper_digit
+  add     al, 'a' - 10
+  jmp     .store_upper
+.upper_digit:
+  add     al, '0'
+.store_upper:
+  mov     BYTE PTR [rsp], al
+
+  mov     al, r8b              # Restore full original byte
+  and     al, 0x0F            # Lower nibble
+  cmp     al, 10
+  jl      .lower_digit
+  add     al, 'a' - 10
+  jmp     .store_lower
+.lower_digit:
+  add     al, '0'
+.store_lower:
+  mov     BYTE PTR [rsp + 1], al
+
+  mov     BYTE PTR [rsp + 2], 10
+
+  mov     rax, SYSCALL_WRITE  # write(1, &hex_buf, 2)
+  mov     rdi, 1
+  lea     rsi, [rsp]
+  mov     rdx, 3
+  syscall
+
+  add     rsp, 32
+
+  pop     rcx
+  ret
 
                 # authentication that didnt work
                 # .type read_xauth_cookie, @function

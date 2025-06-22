@@ -12,6 +12,8 @@
 .set AF_UNIX, 1               # Unix domain socket
 .set SOCK_STREAM, 1           # Stream-oriented socket
 
+.set BALL_RADIUS, 20
+
 .section .rodata
 sun_path:
   .asciz "/tmp/.X11-unix/X1"
@@ -43,7 +45,7 @@ x11_connect_to_server:
   mov     rdx, 0              # automatic
   syscall
 
-  cmp     rax, 0              # check return value from socket()
+  cmp   rax, 0              # check return value from socket()
   jl      die                 # if return is negative then error
 
   mov     rdi, rax            # store the socket fd in rdi for rest of function
@@ -440,6 +442,7 @@ x11_create_window:
 
   .set X11_OP_REQ_CREATE_WINDOW, 0x01
   .set X11_FLAG_WIN_BG_COLOR, 0x00000002
+  .set X11_EVENT_FLAG_KEY_PRESS, 0x0001
   .set X11_EVENT_FLAG_KEY_RELEASE, 0x0002
   .set X11_EVENT_FLAG_EXPOSURE, 0x8000
   .set X11_FLAG_WIN_EVENT, 0x00000800
@@ -460,7 +463,7 @@ x11_create_window:
   mov     DWORD PTR [rsp + 6*4], ecx
   mov     DWORD PTR [rsp + 7*4], X11_FLAG_WIN_BG_COLOR | X11_FLAG_WIN_EVENT
   mov     DWORD PTR [rsp + 8*4], 0
-  mov     DWORD PTR [rsp + 9*4], X11_EVENT_FLAG_KEY_RELEASE | X11_EVENT_FLAG_EXPOSURE
+  mov     DWORD PTR [rsp + 9*4], X11_EVENT_FLAG_KEY_PRESS | X11_EVENT_FLAG_EXPOSURE
 
   mov     rax, SYSCALL_WRITE
   lea     rsi, [rsp]
@@ -510,7 +513,7 @@ x11_read_reply:
   mov     rbp, rsp
 
   # read 32 bytes into read_buf
-  # most messages are around 32 bytes
+  # all messages are 32 bytes
   mov     rax, SYSCALL_READ
   lea     rsi, [read_buf]
   mov     rdx, 32
@@ -542,6 +545,24 @@ poll_messages:
   .set POLLHUP, 0x010
   .set POLLNVAL, 0x020
 
+  .set X11_EVENT_KEYPRESS, 0x2
+  .set X11_EVENT_EXPOSURE, 0xc
+
+  # KEYSYMs from the documentation that are wrong
+  # .set KEYSYM_Q, 0x0071
+  # .set KEYSYM_S, 0x0073
+  # .set KEYSYM_W, 0x0077
+  # .set KEYSYM_ESC, 0xff1b
+  # .set KEYSYM_UP, 0xff52
+  # .set KEYSYM_DOWN, 0xff54
+
+  .set KEYSYM_Q, 0x18
+  .set KEYSYM_S, 0x27
+  .set KEYSYM_W, 0x19
+  .set KEYSYM_ESC, 0x09
+  .set KEYSYM_UP, 0x6f
+  .set KEYSYM_DOWN, 0x74
+
   mov     DWORD PTR [rsp + 0*4], edi
   mov     DWORD PTR [rsp + 1*4], POLLIN
 
@@ -553,11 +574,12 @@ poll_messages:
     mov   rax, SYSCALL_POLL
     lea   rdi, [rsp]                        # struct pollfd *fds
     mov   rsi, 1                            # nfds_t nfds
-    mov   rdx, -1                           # int timeout
+    mov   rdx, 16                           # int timeout, 16 ms ~60 FPS
     syscall
 
     cmp   rax, 0
-    jle   die
+    je    .display
+    jl    die
 
     # polling error
     cmp   DWORD PTR [rsp + 2*4], POLLERR
@@ -570,27 +592,173 @@ poll_messages:
     mov   rdi, [rsp + 0*4]
     call  x11_read_reply
 
-    .set X11_EVENT_EXPOSURE, 0xc
     cmp   eax, X11_EVENT_EXPOSURE
+    jz    .received_exposed_event
+
+    cmp   eax, X11_EVENT_KEYPRESS
+    jz    .received_keypress_event
+
     jnz   .received_other_event
 
     .received_exposed_event:
 
-    mov BYTE PTR [rsp + 24], 1            # Mark as exposed
+    mov   BYTE PTR [rsp + 24], 1            # Mark as exposed
 
+    jmp   .display
+
+    .received_keypress_event:
+
+    mov   al, BYTE PTR [read_buf + 1]       # Get the keycode
+
+    movzx ecx, al
+
+    call  print_hex_2
+
+    mov   eax, ecx
+
+    # q or esc quit
+    cmp   eax, KEYSYM_Q
+    jz   .quit
+
+    cmp   eax, KEYSYM_ESC
+    jz   .quit
+
+    # w and s control left paddle
+    cmp   eax, KEYSYM_W
+    jnz   .not_left_up
+
+    # move LEFT_PADDLE_Y up
+
+    movzx ax, WORD PTR [LEFT_PADDLE_Y]
+    cmp   ax, 20
+    jl    .display
+    sub   ax, 20
+    mov   WORD PTR [LEFT_PADDLE_Y], ax
+    jmp   .display
+
+    .not_left_up:
+    cmp   eax, KEYSYM_S
+    jnz   .not_left_down
+
+    # move LEFT_PADDLE_Y down
+
+    movzx ax, WORD PTR [LEFT_PADDLE_Y]
+    movzx si, WORD PTR [PADDLE_H]
+    add   ax, si
+    movzx si, WORD PTR [WINDOW_H]
+    sub   si, 20
+    cmp   ax, si
+    jg    .display
+    movzx ax, WORD PTR [LEFT_PADDLE_Y]
+    add   ax, 20
+    mov   WORD PTR [LEFT_PADDLE_Y], ax
+    jmp   .display
+
+    # up and down control right paddle
+    .not_left_down:
+    cmp   eax, KEYSYM_UP
+    jnz   .not_right_up
+
+    # move RIGHT_PADDLE_Y up
+
+    movzx ax, WORD PTR [RIGHT_PADDLE_Y]
+    cmp   ax, 20
+    jl    .display
+    sub   ax, 20
+    mov   WORD PTR [RIGHT_PADDLE_Y], ax
+    jmp   .display
+
+    .not_right_up:
+    cmp   eax, KEYSYM_DOWN
+    jnz   .not_right_down                   # no more things to check
+
+    # move RIGHT_PADDLE_Y down
+
+    movzx ax, WORD PTR [RIGHT_PADDLE_Y]
+    movzx si, WORD PTR [PADDLE_H]
+    add   ax, si
+    movzx si, WORD PTR [WINDOW_H]
+    sub   si, 20
+    cmp   ax, si
+    jg    .display
+    movzx ax, WORD PTR [RIGHT_PADDLE_Y]
+    add   ax, 20
+    mov   WORD PTR [RIGHT_PADDLE_Y], ax
+    jmp   .display
+
+    .not_right_down:
     .received_other_event:
 
-    cmp BYTE PTR [rsp + 24], 1            # exposed?
-    jnz .loop
+    cmp   BYTE PTR [rsp + 24], 1            # exposed?
+    jnz   .loop
 
-    # do your stuff here
+    .display:
+    .update_ball:
+      movzx ax, WORD PTR [BALL_VELO_X]
+      movzx di, WORD PTR [BALL_X]
+      add   ax, di
+      mov   BALL_X, ax
+
+      movzx ax, WORD PTR [BALL_VELO_Y]
+      movzx di, WORD PTR [BALL_Y]
+      add   ax, di
+      mov   BALL_Y, ax
+
+    .clear_window:
+      mov   rdi, [rsp + 0]
+      mov   esi, [rsp + 16]
+      call  x11_clear_window
+
     .draw_paddles:
-      mov   rdi, [rsp + 0]                # socket fd
-      mov   esi, [rsp + 16]               # window id
-      mov   edx, [rsp + 20]               # gc id
+      mov   rdi, [rsp + 0]                  # socket fd
+      mov   esi, [rsp + 16]                 # window id
+      mov   edx, [rsp + 20]                 # gc id
       call  x11_draw_paddles
 
+    .draw_ball:
+      mov   rdi, [rsp + 0]
+      mov   esi, [rsp + 16]
+      mov   edx, [rsp + 20]
+      call  x11_draw_ball
+
     jmp .loop
+
+  .quit:
+  add     rsp, 32
+
+  pop     rbp
+  ret
+
+.type x11_clear_window, @function
+# Clears the window using WINDOW_H and WINDOW_W
+# @param rdi The socket file descriptor
+# @param esi The window id
+x11_clear_window:
+  push    rbp
+  mov     rbp, rsp
+
+  .set X11_OP_REQ_CLEAR_AREA, 0x3d
+
+  sub     rsp, 32
+
+  mov     BYTE PTR [rsp + 0], X11_OP_REQ_CLEAR_AREA
+  mov     BYTE PTR [rsp + 1], 0
+  mov     WORD PTR [rsp + 2], 4
+  mov     DWORD PTR [rsp + 4], esi
+
+  mov     WORD PTR [rsp + 8], 0
+  mov     WORD PTR [rsp + 10], 0
+
+  movzx   ax, WORD PTR [WINDOW_W]
+  mov     WORD PTR [rsp + 12], ax
+
+  movzx   ax, WORD PTR [WINDOW_H]
+  mov     WORD PTR [rsp + 14], ax
+
+  mov     rax, SYSCALL_WRITE
+  lea     rsi, [rsp]
+  mov     rdx, 16
+  syscall
 
   add     rsp, 32
 
@@ -649,6 +817,51 @@ x11_draw_paddles:
   syscall
 
   cmp     rax, 28
+  jnz     die
+
+  add     rsp, 32
+
+  pop     rbp
+  ret
+
+.type x11_draw_ball, @function
+# Draw the paddles in a X11 window
+# @param rdi The socket file descriptor
+# @param esi The window id
+# @param edx The gc id
+x11_draw_ball:
+  push    rbp
+  mov     rbp, rsp
+
+  .set X11_OP_REQ_POLY_FILL_ARC, 0x47
+
+  sub     rsp, 32
+
+  mov     BYTE PTR [rsp + 0], X11_OP_REQ_POLY_FILL_ARC
+  mov     BYTE PTR [rsp + 1], 0
+  mov     WORD PTR [rsp + 2], 3 + 3           # request length 3+3n, 1 arc
+  mov     DWORD PTR [rsp + 4], esi
+  mov     DWORD PTR [rsp + 8], edx
+
+  # ARC [x, y: INT16, width, height: CARD16, angle1, angle2: INT16]
+  movzx   ax, WORD PTR [BALL_X]
+  mov     WORD PTR [rsp + 12], ax
+
+  movzx   ax, WORD PTR [BALL_Y]
+  mov     WORD PTR [rsp + 14], ax
+
+  mov     WORD PTR [rsp + 16], BALL_RADIUS * 2
+  mov     WORD PTR [rsp + 18], BALL_RADIUS * 2
+
+  mov     WORD PTR [rsp + 20], 0 * 64
+  mov     WORD PTR [rsp + 22], 360 * 64
+
+  mov     rax, SYSCALL_WRITE
+  lea     rsi, [rsp]
+  mov     rdx, 24
+  syscall
+
+  cmp     rax, 24
   jnz     die
 
   add     rsp, 32

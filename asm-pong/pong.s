@@ -1,6 +1,7 @@
 .intel_syntax noprefix
 .globl _start, id, id_base, id_mask, root_visual_id, WINDOW_W, WINDOW_H
 .globl LEFT_PADDLE_X, LEFT_PADDLE_Y, RIGHT_PADDLE_X, RIGHT_PADDLE_Y, PADDLE_H, PADDLE_W
+.globl BALL_X, BALL_Y, BALL_VELO_X, BALL_VELO_Y
 
 .section .data
 msg:
@@ -29,6 +30,14 @@ RIGHT_PADDLE_Y:
 PADDLE_H: # height / 4
   .word 0
 PADDLE_W: # width / 80
+  .word 0
+BALL_X:
+  .word 0
+BALL_Y:
+  .word 0
+BALL_VELO_X:
+  .word 10
+BALL_VELO_Y:
   .word 0
 
 .set SYSCALL_WRITE, 1
@@ -147,14 +156,26 @@ _start:
   xor     dx, dx
   div     di                  # ax = CENTER_H
 
+  sub     ax, BALL_RADIUS
+  mov     WORD PTR [BALL_Y], ax
+
+  add     ax, BALL_RADIUS
   sub     ax, si              # ax = CENTER_H - PADDLE_H / 2
 
   mov     WORD PTR [LEFT_PADDLE_Y], ax
   mov     WORD PTR [RIGHT_PADDLE_Y], ax
 
-  # store WINDOW_W / 20 in ax
+  # calculate CENTER_W = WINDOW_W / 2
   movzx   ax, cx
-  mov     di, 20
+  mov     di, 2
+  xor     dx, dx
+  div     di
+
+  sub     ax, BALL_RADIUS
+  mov     WORD PTR [BALL_X], ax
+
+  add     ax, BALL_RADIUS
+  mov     di, 10
   xor     dx, dx
   div     di
 
