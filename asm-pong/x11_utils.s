@@ -6,13 +6,25 @@
 .set SYSCALL_READ, 0
 .set SYSCALL_WRITE, 1
 .set SYSCALL_POLL, 7
+.set SYSCALL_NANOSLEEP, 35
 .set SYSCALL_SOCKET, 41
 .set SYSCALL_CONNECT, 42
+.set SYSCALL_CLOCK_GETTIME, 228
 
 .set AF_UNIX, 1               # Unix domain socket
 .set SOCK_STREAM, 1           # Stream-oriented socket
 
 .set BALL_RADIUS, 20
+
+.section .data
+left_score:
+  .quad 0
+right_score:
+  .quad 0
+score_buf:
+  .space 21
+digits:
+  .asciz "0123456789"
 
 .section .rodata
 sun_path:
@@ -28,6 +40,12 @@ xauth_path_2:
 .balign 16
 read_buf:
   .skip 65536                 # reserve 64 KB for reading
+start_time:
+  .skip 16
+end_time:
+  .skip 16
+sleep_time:
+  .skip 16
 
 .section .text
 .type x11_connect_to_server, @function
@@ -563,6 +581,14 @@ poll_messages:
   .set KEYSYM_UP, 0x6f
   .set KEYSYM_DOWN, 0x74
 
+  .set NO_PADDLE_MOVEMENT, 0x00
+  .set LEFT_PADDLE_UP, 0x01
+  .set LEFT_PADDLE_DOWN, 0x02
+  .set RIGHT_PADDLE_UP, 0x04
+  .set RIGHT_PADDLE_DOWN, 0x08
+
+  .set CLOCK_MONOTONIC, 1
+
   mov     DWORD PTR [rsp + 0*4], edi
   mov     DWORD PTR [rsp + 1*4], POLLIN
 
@@ -571,6 +597,11 @@ poll_messages:
   mov     BYTE PTR [rsp + 24], 0            # exposed? (bool)
 
   .loop:
+    mov   rdi, 1
+    lea   rsi, [rip + start_time]
+    mov   eax, SYSCALL_CLOCK_GETTIME
+    syscall
+
     mov   rax, SYSCALL_POLL
     lea   rdi, [rsp]                        # struct pollfd *fds
     mov   rsi, 1                            # nfds_t nfds
@@ -612,7 +643,7 @@ poll_messages:
 
     movzx ecx, al
 
-    call  print_hex_2
+    call  print_keypress
 
     mov   eax, ecx
 
@@ -629,6 +660,8 @@ poll_messages:
 
     # move LEFT_PADDLE_Y up
 
+    mov   r8, LEFT_PADDLE_UP
+
     movzx ax, WORD PTR [LEFT_PADDLE_Y]
     cmp   ax, 20
     jl    .display
@@ -641,6 +674,8 @@ poll_messages:
     jnz   .not_left_down
 
     # move LEFT_PADDLE_Y down
+
+    mov   r8, LEFT_PADDLE_DOWN
 
     movzx ax, WORD PTR [LEFT_PADDLE_Y]
     movzx si, WORD PTR [PADDLE_H]
@@ -661,6 +696,8 @@ poll_messages:
 
     # move RIGHT_PADDLE_Y up
 
+    mov   r8, RIGHT_PADDLE_UP
+
     movzx ax, WORD PTR [RIGHT_PADDLE_Y]
     cmp   ax, 20
     jl    .display
@@ -673,6 +710,8 @@ poll_messages:
     jnz   .not_right_down                   # no more things to check
 
     # move RIGHT_PADDLE_Y down
+
+    mov   r8, RIGHT_PADDLE_DOWN
 
     movzx ax, WORD PTR [RIGHT_PADDLE_Y]
     movzx si, WORD PTR [PADDLE_H]
@@ -687,10 +726,13 @@ poll_messages:
     jmp   .display
 
     .not_right_down:
+
+    mov   r8, NO_PADDLE_MOVEMENT
+
     .received_other_event:
 
     cmp   BYTE PTR [rsp + 24], 1            # exposed?
-    jnz   .loop
+    jnz   .sleep
 
     .display:
     .update_ball:
@@ -703,6 +745,46 @@ poll_messages:
       movzx di, WORD PTR [BALL_Y]
       add   ax, di
       mov   BALL_Y, ax
+
+    .ball_outside:
+      movzx ax, WORD PTR [BALL_X]
+      cmp   ax, 0
+      jle   .inc_right_score
+      movzx di, WORD PTR [WINDOW_W]
+      sub   di, BALL_RADIUS * 2
+      cmp   ax, di
+      jle   .clear_window
+
+      .inc_left_score:
+      mov   rax, QWORD PTR [left_score]
+      inc   rax
+      mov   QWORD PTR [left_score], rax
+
+      jmp  .update_ball_position
+
+      .inc_right_score:
+      mov   rax, QWORD PTR [right_score]
+      inc   rax
+      mov   QWORD PTR [right_score], rax
+
+      .update_ball_position:
+      movzx ax, WORD PTR [BALL_VELO_X]
+      neg   ax
+      mov   WORD PTR [BALL_VELO_X], ax
+
+      movzx ax, WORD PTR [BALL_VELO_Y]
+      test  ax, ax
+      jnz   .velo_y_not_zero
+      mov   WORD PTR [BALL_VELO_Y], 4
+
+      .velo_y_not_zero:
+      movzx ax, WORD PTR [WINDOW_W]
+      mov   di, 2
+      xor   dx, dx
+      div   di
+
+      sub   ax, BALL_RADIUS
+      mov   WORD PTR [BALL_X], ax
 
     .clear_window:
       mov   rdi, [rsp + 0]
@@ -720,6 +802,104 @@ poll_messages:
       mov   esi, [rsp + 16]
       mov   edx, [rsp + 20]
       call  x11_draw_ball
+
+    .draw_score:
+      mov   rax, left_score
+      call  fill_score_buf
+
+      mov   r10, rax
+
+      movzx ax, WORD PTR [WINDOW_W]
+      mov   di, 2
+      xor   dx, dx
+      div   di
+
+      mov   rdi, [rsp + 0]
+      lea   rsi, [score_buf + 20]
+      sub   rsi, r10
+      mov   edx, r10d
+      mov   ecx, [rsp + 16]
+      mov   r8d, [rsp + 20]
+      mov   r9d, 100
+      shl   r9d, 16
+      or    r9d, eax
+      mov   r11d, r10d
+      .subtract_1:
+      sub   r9d, 20
+      dec   r11d
+      test  r11d, r11d
+      jnz   .subtract_1
+      call  x11_draw_text
+
+      mov   rax, right_score
+      call  fill_score_buf
+
+      mov   r10, rax
+
+      movzx ax, WORD PTR [WINDOW_W]
+      mov   di, 2
+      xor   dx, dx
+      div   di
+
+      mov   rdi, [rsp + 0]
+      lea   rsi, [score_buf + 20]
+      sub   rsi, r10
+      mov   edx, r10d
+      mov   ecx, [rsp + 16]
+      mov   r8d, [rsp + 20]
+      mov   r9d, 100
+      shl   r9d, 16
+      or    r9d, eax
+      add   r9d, 20
+      call  x11_draw_text
+
+    # check for collisions and update velocity
+    .check_collision:
+      mov   rdx, r8
+      call  check_collision
+
+    cmp     rax, 0
+    je      .no_collision
+
+    .collision:
+      call  update_velocity
+
+    .no_collision:
+    .sleep:
+    mov   rdi, CLOCK_MONOTONIC
+    lea   rsi, [rip + end_time]
+    mov   eax, SYSCALL_CLOCK_GETTIME
+    syscall
+
+    # compute elapsed time in nanoseconds
+    mov   rax, QWORD PTR [rip + end_time]
+    sub   rax, QWORD PTR [rip + start_time]
+    mov   rcx, 1000000000
+    mul   rcx
+    mov   r8, rax
+
+    mov   rax, QWORD PTR [rip + end_time + 8]
+    sub   rax, QWORD PTR [rip + start_time + 8]
+    add   r8, rax
+
+    mov   rax, 16000000
+    cmp   r8, rax
+    jae   .loop
+
+    mov   rax, 16000000
+    sub   rax, r8
+
+    xor   rdx, rdx
+    mov   rcx, 1000000000
+    div   rcx
+
+    mov   QWORD PTR [rip + sleep_time], rax
+    mov   QWORD PTR [rip + sleep_time + 8], rdx
+
+    lea   rdi, [rip + sleep_time]
+    xor   rsi, rsi
+    mov   eax, SYSCALL_NANOSLEEP
+    syscall
 
     jmp .loop
 
@@ -865,6 +1045,100 @@ x11_draw_ball:
   jnz     die
 
   add     rsp, 32
+
+  pop     rbp
+  ret
+
+.type x11_draw_text, @function
+# Draw text in a X11 window with server-side text rendering.
+# @param rdi The socket file descriptor.
+# @param rsi The text string.
+# @param edx The text string length in bytes.
+# @param ecx The window id.
+# @param r8d The gc id.
+# @param r9d Packed x and y.
+x11_draw_text:
+  push    rbp
+  mov     rbp, rsp
+ 
+  sub     rsp, 1024
+
+  mov     DWORD PTR [rsp + 1*4], ecx
+  mov     DWORD PTR [rsp + 2*4], r8d
+  mov     DWORD PTR [rsp + 3*4], r9d
+
+  mov     r8d, edx
+  mov     QWORD PTR [rsp + 1024 - 8], rdi
+
+  # Compute padding and packet u32 count with division and modulo 4.
+  mov     eax, edx                   # Put dividend in eax.
+  mov     ecx, 4                     # Put divisor in ecx.
+  cdq                                # Sign extend.
+  idiv    ecx                        # Compute eax / ecx, and put the remainder (i.e. modulo) in edx.
+  # LLVM optimizer magic: `(4-x)%4 == -x & 3`, for some reason.
+  neg     edx
+  and     edx, 3
+  mov     r9d, edx                   # Store padding in r9.
+
+  mov     eax, r8d 
+  add     eax, r9d
+  shr     eax, 2                     # Compute: eax /= 4
+  add     eax, 4                     # eax now contains the packet u32 count.
+
+  .set X11_OP_REQ_IMAGE_TEXT8, 0x4c
+  mov     DWORD PTR [rsp + 0*4], r8d
+  shl     DWORD PTR [rsp + 0*4], 8
+  or      DWORD PTR [rsp + 0*4], X11_OP_REQ_IMAGE_TEXT8
+  mov     ecx, eax
+  shl     ecx, 16
+  or      [rsp + 0*4], ecx
+
+  # Copy the text string into the packet data on the stack.
+  mov     rsi, rsi                   # Source string in rsi.
+  lea     rdi, [rsp + 4*4]           # Destination
+  cld                                # Move forward
+  mov     ecx, r8d                   # String length.
+  rep     movsb                      # Copy.
+
+  mov     rdx, rax                   # packet u32 count
+  imul    rdx, 4
+  mov     rax, SYSCALL_WRITE
+  mov     rdi, QWORD PTR [rsp + 1024 - 8]
+  lea     rsi, [rsp]
+  syscall
+
+  cmp     rax, rdx
+  jnz     die
+
+  add     rsp, 1024
+
+  pop     rbp
+  ret
+
+.type fill_score_buf, @function
+# Fills the score_buf with the score as a string
+# @param rax The score
+# @return rax Length of string
+fill_score_buf:
+  push    rbp
+  mov     rbp, rsp
+
+  lea     rdi, [score_buf + 20]
+  mov     rcx, 10
+  mov     rbx, rcx
+  mov     r8, 0
+
+  convert_loop:
+    inc   r8
+    xor   rdx, rdx
+    div   rbx
+    dec   rdi
+    movzx rcx, BYTE PTR [digits + rdx]
+    mov   [rdi], cl
+    test  rax, rax
+    jnz   convert_loop
+
+  mov     rax, r8
 
   pop     rbp
   ret

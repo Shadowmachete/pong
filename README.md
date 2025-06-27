@@ -4,4 +4,4 @@
 Done, works, cool
 
 ## Pong in GAS ASM
-Doing...
+Have an actual working pong game made in ASM now

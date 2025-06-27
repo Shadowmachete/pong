@@ -38,7 +38,7 @@ BALL_Y:
 BALL_VELO_X:
   .word 10
 BALL_VELO_Y:
-  .word 0
+  .word 4
 
 .set SYSCALL_WRITE, 1
 .set SYSCALL_EXIT, 60
